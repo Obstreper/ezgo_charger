@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import timedelta
 from typing import Any
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.exc import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -30,6 +32,7 @@ from .const import (
     REG_POLL,
     REG_RTC_A,
     REG_RTC_B,
+    SERVICE_UUID,
     STATUS_REG,
     WRITE_CHAR_UUID,
     WRITE_GAP,
@@ -110,17 +113,7 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "the phone app (the charger only accepts one connection)."
                 )
 
-            _LOGGER.debug("Connecting to EZgo charger %s", self.address)
-            client = await establish_connection(
-                BleakClientWithServiceCache,
-                ble_device,
-                self.address,
-                disconnected_callback=self._handle_disconnect,
-            )
-            await client.start_notify(NOTIFY_CHAR_UUID, self._handle_notify)
-            self._client = client
-            self._buffer.clear()
-            _LOGGER.debug("Connected to EZgo charger %s", self.address)
+            self._client = await self._connect(ble_device)
 
         # best-effort clock sync, mirrors what the phone app does on connect
         if not self._rtc_synced:
@@ -129,6 +122,82 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._rtc_synced = True
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("RTC sync skipped: %s", err)
+
+    async def _connect(self, ble_device) -> BleakClientWithServiceCache:
+        """Connect, verify the charger's GATT layout, and subscribe to notifies.
+
+        The charger's UART service (``SERVICE_UUID``) carries the notify char at
+        ``NOTIFY_CHAR_UUID`` and the write char at ``WRITE_CHAR_UUID`` - verified
+        against the btsnoop GATT discovery (see PROTOCOL.md). When we connect
+        through an ESPHome Bluetooth proxy the services can come back from a
+        stale cache that predates a full discovery (the charger only accepts one
+        connection, so an early attempt while the phone app was paired can cache
+        a half-populated DB). In that case ``start_notify`` raises
+        "Characteristic ... was not found!". Clear the cache and rediscover once
+        before giving up.
+        """
+        for attempt in range(2):
+            _LOGGER.debug(
+                "Connecting to EZgo charger %s (attempt %d/2)", self.address, attempt + 1
+            )
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                ble_device,
+                self.address,
+                disconnected_callback=self._handle_disconnect,
+            )
+
+            missing = [
+                uuid
+                for uuid in (NOTIFY_CHAR_UUID, WRITE_CHAR_UUID)
+                if client.services.get_characteristic(uuid) is None
+            ]
+            if not missing:
+                try:
+                    await client.start_notify(NOTIFY_CHAR_UUID, self._handle_notify)
+                except BleakError as err:
+                    _LOGGER.debug("start_notify failed: %s", err)
+                    missing = [NOTIFY_CHAR_UUID]
+                else:
+                    self._buffer.clear()
+                    _LOGGER.debug("Connected to EZgo charger %s", self.address)
+                    return client
+
+            _LOGGER.warning(
+                "EZgo charger %s: characteristic(s) %s not in the discovered GATT "
+                "services (attempt %d/2). Expected them under service %s. "
+                "Discovered: %s",
+                self.address,
+                ", ".join(missing),
+                attempt + 1,
+                SERVICE_UUID,
+                self._describe_services(client),
+            )
+
+            if attempt == 0:
+                with contextlib.suppress(Exception):
+                    await client.clear_cache()
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+
+        raise UpdateFailed(
+            f"EZgo charger {self.address}: notify characteristic {NOTIFY_CHAR_UUID} "
+            "not found even after clearing the GATT cache and rediscovering. The "
+            "Bluetooth proxy may not expose the charger's 128-bit UART service - "
+            "check that it runs recent ESPHome with active connections enabled."
+        )
+
+    @staticmethod
+    def _describe_services(client: BleakClientWithServiceCache) -> str:
+        """One-line dump of the discovered services for the failure log."""
+        try:
+            described = "; ".join(
+                f"{service.uuid}[{','.join(c.uuid for c in service.characteristics)}]"
+                for service in client.services
+            )
+            return described or "(no services)"
+        except Exception:  # noqa: BLE001
+            return "(unavailable)"
 
     async def _disconnect(self) -> None:
         client, self._client = self._client, None

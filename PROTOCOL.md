@@ -18,11 +18,28 @@ tshark -r btsnoop_hci.log \
 
 ## GATT layer
 
+Full service discovery (btsnoop `ReadByGroupType` / `ReadByType` / `FindInformation`
+responses, verified byte-for-byte across all 10 reconnects in capture 3):
+
+```
+0x0001-0x0004  GATT service            (0x1801)
+0x0005-0x000b  GAP service             (0x1800)
+0x000c-0x0011  55535343-fe7d-4ae5-8fa9-9fafd205e455   <- UART service
+                 0x000e  49535343-8841-43f4-a8d4-ecbe34729bb3  props 0x10 Notify        (charger -> phone)
+                 0x000f  0x2902 CCCD for 0x000e
+                 0x0011  49535343-1e4d-4bd9-ba61-23c647249616  props 0x04 WriteNoResponse (phone -> charger)
+0x0012-0x0017  ffeeddccbbaa-9988-7766-5544-33221100   <- second vendor service, unused
+```
+
+Note the notify/write UUIDs are **swapped** relative to the usual Microchip/ISSC
+"Transparent UART" convention (where `8841` is the write char). The capture is
+authoritative: `8841` here is Notify-only, `1e4d` is Write-without-response-only.
+
 | direction        | ATT opcode                | handle  | note                        |
 |------------------|---------------------------|---------|-----------------------------|
-| phone -> charger | `0x52` Write Command      | `0x0011`| all app commands            |
-| charger -> phone | `0x1b` Handle Value Notify | `0x000e`| all charger responses/telemetry |
-| phone -> charger | `0x12` Write Request       | `0x0004`, `0x000f` | CCCD enable (notifications) |
+| phone -> charger | `0x52` Write Command      | `0x0011`| all app commands (char `49535343-1e4d-…`) |
+| charger -> phone | `0x1b` Handle Value Notify | `0x000e`| all charger responses/telemetry (char `49535343-8841-…`) |
+| phone -> charger | `0x12` Write Request       | `0x0004`, `0x000f` | CCCD enable (`0x0001` = notifications) |
 
 Notifications are ~1400‑byte-capable; long frames (type `0x71`/`0x77`) arrive in one notification.
 
