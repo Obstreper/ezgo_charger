@@ -7,6 +7,7 @@ import contextlib
 import logging
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakError
@@ -42,6 +43,19 @@ from .protocol import build_frame, parse_frames, parse_status
 _LOGGER = logging.getLogger(__name__)
 
 
+def _reverse_uuid(uuid: str) -> str:
+    """Return *uuid* with its 16 raw bytes reversed.
+
+    Connecting to this charger through an ESPHome Bluetooth proxy has been seen
+    to report every 128-bit UUID with the byte order flipped end-to-end, e.g.
+    ``49535343-8841-43f4-a8d4-ecbe34729bb3`` comes back as
+    ``b39b7234-beec-d4a8-f443-418843535349``. We look the characteristics up
+    under both spellings so the integration works regardless of which side of
+    that quirk we land on.
+    """
+    return str(UUID(bytes=UUID(uuid).bytes[::-1]))
+
+
 class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Owns the persistent BLE connection and the 0x77 poll loop."""
 
@@ -58,6 +72,10 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.address: str = entry.data[CONF_ADDRESS].upper()
 
         self._client: BleakClientWithServiceCache | None = None
+        # Resolved from the discovered GATT DB on connect - may be found under the
+        # expected UUID or its byte-reversed variant (ESPHome proxy quirk).
+        self._notify_char: BleakGATTCharacteristic | None = None
+        self._write_char: BleakGATTCharacteristic | None = None
         self._buffer = bytearray()
         self._device_id: bytes = DEFAULT_DEVICE_ID
         self._status: dict[str, Any] = {}
@@ -129,12 +147,16 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The charger's UART service (``SERVICE_UUID``) carries the notify char at
         ``NOTIFY_CHAR_UUID`` and the write char at ``WRITE_CHAR_UUID`` - verified
         against the btsnoop GATT discovery (see PROTOCOL.md). When we connect
-        through an ESPHome Bluetooth proxy the services can come back from a
-        stale cache that predates a full discovery (the charger only accepts one
-        connection, so an early attempt while the phone app was paired can cache
-        a half-populated DB). In that case ``start_notify`` raises
-        "Characteristic ... was not found!". Clear the cache and rediscover once
-        before giving up.
+        through an ESPHome Bluetooth proxy two quirks have been observed:
+
+        * the services can come back from a stale cache that predates a full
+          discovery (the charger only accepts one connection, so an early
+          attempt while the phone app was paired can cache a half-populated DB);
+        * every 128-bit UUID can come back byte-reversed, so the characteristics
+          appear under ``_reverse_uuid(...)`` instead of their real UUIDs.
+
+        Resolve the notify/write characteristics under either spelling; on a
+        genuine miss, clear the cache and rediscover once before giving up.
         """
         for attempt in range(2):
             _LOGGER.debug(
@@ -147,28 +169,33 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 disconnected_callback=self._handle_disconnect,
             )
 
+            notify_char = self._resolve_char(client, NOTIFY_CHAR_UUID)
+            write_char = self._resolve_char(client, WRITE_CHAR_UUID)
             missing = [
-                uuid
-                for uuid in (NOTIFY_CHAR_UUID, WRITE_CHAR_UUID)
-                if client.services.get_characteristic(uuid) is None
+                name
+                for name, char in (("notify", notify_char), ("write", write_char))
+                if char is None
             ]
             if not missing:
                 try:
-                    await client.start_notify(NOTIFY_CHAR_UUID, self._handle_notify)
+                    await client.start_notify(notify_char, self._handle_notify)
                 except BleakError as err:
                     _LOGGER.debug("start_notify failed: %s", err)
-                    missing = [NOTIFY_CHAR_UUID]
+                    missing = ["notify"]
                 else:
+                    self._notify_char = notify_char
+                    self._write_char = write_char
                     self._buffer.clear()
                     _LOGGER.debug("Connected to EZgo charger %s", self.address)
                     return client
 
             _LOGGER.warning(
-                "EZgo charger %s: characteristic(s) %s not in the discovered GATT "
-                "services (attempt %d/2). Expected them under service %s. "
+                "EZgo charger %s: %s characteristic(s) not in the discovered GATT "
+                "services (attempt %d/2), under either the expected UUIDs or their "
+                "byte-reversed variants. Expected them under service %s. "
                 "Discovered: %s",
                 self.address,
-                ", ".join(missing),
+                "/".join(missing),
                 attempt + 1,
                 SERVICE_UUID,
                 self._describe_services(client),
@@ -182,10 +209,27 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         raise UpdateFailed(
             f"EZgo charger {self.address}: notify characteristic {NOTIFY_CHAR_UUID} "
-            "not found even after clearing the GATT cache and rediscovering. The "
-            "Bluetooth proxy may not expose the charger's 128-bit UART service - "
-            "check that it runs recent ESPHome with active connections enabled."
+            f"(or its byte-reversed form {_reverse_uuid(NOTIFY_CHAR_UUID)}) not found "
+            "even after clearing the GATT cache and rediscovering. The Bluetooth "
+            "proxy may not expose the charger's 128-bit UART service - check that it "
+            "runs recent ESPHome with active connections enabled."
         )
+
+    @staticmethod
+    def _resolve_char(
+        client: BleakClientWithServiceCache, uuid: str
+    ) -> BleakGATTCharacteristic | None:
+        """Find a characteristic by its UUID or its byte-reversed variant."""
+        char = client.services.get_characteristic(uuid)
+        if char is None:
+            char = client.services.get_characteristic(_reverse_uuid(uuid))
+            if char is not None:
+                _LOGGER.debug(
+                    "Matched %s via byte-reversed UUID %s (ESPHome proxy quirk)",
+                    uuid,
+                    char.uuid,
+                )
+        return char
 
     @staticmethod
     def _describe_services(client: BleakClientWithServiceCache) -> str:
@@ -201,11 +245,13 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _disconnect(self) -> None:
         client, self._client = self._client, None
+        notify_char, self._notify_char = self._notify_char, None
+        self._write_char = None
         if client is None:
             return
         try:
             if client.is_connected:
-                await client.stop_notify(NOTIFY_CHAR_UUID)
+                await client.stop_notify(notify_char or NOTIFY_CHAR_UUID)
                 await client.disconnect()
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Error during disconnect: %s", err)
@@ -214,6 +260,8 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _handle_disconnect(self, _client: BleakClientWithServiceCache) -> None:
         _LOGGER.debug("EZgo charger %s disconnected", self.address)
         self._client = None
+        self._notify_char = None
+        self._write_char = None
         self._buffer.clear()
         self._rtc_synced = False
 
@@ -247,7 +295,11 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _send(self, frame: bytes) -> None:
         if self._client is None or not self._client.is_connected:
             raise UpdateFailed("EZgo charger not connected")
-        await self._client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
+        # Use the characteristic resolved on connect (may have been found under
+        # the byte-reversed UUID); fall back to the plain UUID just in case.
+        await self._client.write_gatt_char(
+            self._write_char or WRITE_CHAR_UUID, frame, response=False
+        )
 
     async def _sync_rtc(self) -> None:
         now = dt_util.now()

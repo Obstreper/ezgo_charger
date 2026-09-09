@@ -35,6 +35,16 @@ Note the notify/write UUIDs are **swapped** relative to the usual Microchip/ISSC
 "Transparent UART" convention (where `8841` is the write char). The capture is
 authoritative: `8841` here is Notify-only, `1e4d` is Write-without-response-only.
 
+**Byte-reversed UUIDs through an ESPHome proxy.** When Home Assistant reaches the
+charger through an ESPHome Bluetooth proxy, the discovered 128-bit UUIDs can come
+back with all 16 bytes reversed, e.g. the notify char shows up as
+`b39b7234-beec-d4a8-f443-418843535349` and the service as
+`55e405d2-af9f-a98f-e54a-7dfe43535355`. (Wireshark also *displays* these reversed
+forms in its bracketed `[Service UUID]` / `[Characteristic UUID]` cross-reference
+fields, but the on-wire `UUID:` value is the normal orientation.) The coordinator
+looks characteristics up under both orientations - see `_reverse_uuid()` in
+`coordinator.py`.
+
 | direction        | ATT opcode                | handle  | note                        |
 |------------------|---------------------------|---------|-----------------------------|
 | phone -> charger | `0x52` Write Command      | `0x0011`| all app commands (char `49535343-1e4d-…`) |
