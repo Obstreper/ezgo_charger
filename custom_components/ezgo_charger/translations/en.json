@@ -1,0 +1,45 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "MSI EZgo EV Charger",
+        "description": "Enter the Bluetooth MAC address of the charger. The known address is pre-filled.",
+        "data": {
+          "address": "Bluetooth address"
+        }
+      },
+      "confirm": {
+        "title": "MSI EZgo EV Charger",
+        "description": "Set up {name}?"
+      }
+    },
+    "error": {
+      "invalid_address": "That does not look like a Bluetooth MAC address (expected AA:BB:CC:DD:EE:FF)."
+    },
+    "abort": {
+      "already_configured": "This charger is already configured.",
+      "no_devices_found": "No EZgo charger found nearby."
+    }
+  },
+  "entity": {
+    "number": {
+      "charge_current": { "name": "Charge current" }
+    },
+    "time": {
+      "scheduled_start": { "name": "Scheduled start" }
+    },
+    "sensor": {
+      "voltage": { "name": "Voltage" },
+      "temp_1": { "name": "Temperature 1" },
+      "temp_2": { "name": "Temperature 2" },
+      "temp_3": { "name": "Temperature 3" },
+      "temp_4": { "name": "Temperature 4" },
+      "state": { "name": "State" },
+      "schedule_countdown": { "name": "Scheduled start in" },
+      "current": { "name": "Charging current" },
+      "power": { "name": "Charging power" },
+      "energy": { "name": "Session energy" }
+    }
+  }
+}
