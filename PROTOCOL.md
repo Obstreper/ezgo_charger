@@ -121,7 +121,7 @@ Length 80 bytes. Offsets are within that 80‑byte block:
 | +10 | ts6           | **charger RTC "now"**         | tracks wall clock (starts 15:19:41)     |
 | +16 | ts6           | RTC now **+ 60 s**            | always exactly ts1 + 1 min              |
 | +22 | `00 00`       | —                            |                                         |
-| +24 | `0a 00`       | 10 const                     | rated/max current (10 A model); unchanged when setpoint changed |
+| +24 | `0a 00`       | **rated current / pigtail rating (A)** | `10` across all 1218 status frames in every capture; stays `10` while the setpoint (+26) is driven `8→10`. Best guess for the value the aConnect app clamps selectable amperage to (8/10 A on the 10 A tail). **Only the 10 A tail has been captured** — that this tracks the 15 A pigtail is unverified; capture one 0x77 with the 15 A tail to confirm it reads `0f`. The trailing `0a 00` of the `0x71` config block is a second candidate. |
 | +26 | u16 LE        | **configured charge current (A)** | `08`→`0a` the instant a `16/12 0a` write lands. = the `0x16/0x12` value |
 | +28 | `00 00 00 00` | —                            |                                         |
 | +32 | `78 00`       | 120 const                    | setting (target SOC / nominal V?)       |

@@ -23,8 +23,11 @@ from .const import (
     CMD_ENTER,
     CMD_SET_CURRENT,
     CMD_SET_SCHEDULE,
+    CURRENT_MAX,
+    CURRENT_MIN,
     DEFAULT_DEVICE_ID,
     DOMAIN,
+    KNOWN_RATED_CURRENTS,
     MAX_BUFFER,
     NOTIFY_CHAR_UUID,
     NOTIFY_SETTLE,
@@ -83,6 +86,7 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._rtc_synced = False
         self._write_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
+        self._rated_current_warned: set[int] = set()
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator
@@ -311,14 +315,66 @@ class EzgoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await asyncio.sleep(WRITE_GAP)
             await self._send(build_frame(REG_RTC_B, self._device_id + b"\x01" + ts6))
 
+    @property
+    def rated_current(self) -> int | None:
+        """Current-limit pigtail rating the charger reports (0x77 DATA +24).
+
+        Reads 10 in every capture; the aConnect app clamps selectable amperage
+        to it. ``None`` until the first status frame. An unexpected value (not in
+        ``KNOWN_RATED_CURRENTS``) is logged once and treated as the lowest known
+        rating - see PROTOCOL.md; only the 10 A tail has been captured.
+        """
+        value = self._status.get("rated_current")
+        if not value:
+            return None
+        if value in KNOWN_RATED_CURRENTS:
+            return value
+        if value not in self._rated_current_warned:
+            self._rated_current_warned.add(value)
+            _LOGGER.warning(
+                "EZgo charger %s reported an unexpected rated current of %s A "
+                "(known: %s). Clamping the charge-current control to %s A - please "
+                "file an issue with a 0x77 status dump so the pigtail table can be "
+                "extended.",
+                self.address,
+                value,
+                ", ".join(f"{a} A" for a in KNOWN_RATED_CURRENTS),
+                min(KNOWN_RATED_CURRENTS),
+            )
+        return min(KNOWN_RATED_CURRENTS)
+
+    @property
+    def current_max(self) -> int:
+        """Upper bound for the charge-current setpoint (pigtail rating if known)."""
+        rated = self.rated_current
+        if rated is None:
+            return CURRENT_MAX
+        return max(CURRENT_MIN, min(rated, CURRENT_MAX))
+
     async def async_set_current(self, amps: int) -> None:
-        """Write the charge-current setpoint (0x16 / 0x12, one byte of amps)."""
+        """Write the charge-current setpoint (0x16 / 0x12, one byte of amps).
+
+        Hard-clamped to ``[CURRENT_MIN, current_max]`` regardless of what the
+        caller asks for, mirroring the app's safety clamp to the installed tail.
+        """
+        requested = int(round(amps))
+        clamped = max(CURRENT_MIN, min(requested, self.current_max))
+        if clamped != requested:
+            _LOGGER.warning(
+                "EZgo charger %s: charge current %s A is outside the allowed "
+                "%s-%s A range; writing %s A instead.",
+                self.address,
+                requested,
+                CURRENT_MIN,
+                self.current_max,
+                clamped,
+            )
         await self._ensure_connected()
         async with self._write_lock:
             await self._send(build_frame(REG_CMD, bytes((CMD_ENTER,))))
             await asyncio.sleep(WRITE_GAP)
             await self._send(
-                build_frame(REG_CMD, bytes((CMD_SET_CURRENT, amps & 0xFF)))
+                build_frame(REG_CMD, bytes((CMD_SET_CURRENT, clamped & 0xFF)))
             )
         await asyncio.sleep(WRITE_GAP)
         await self.async_request_refresh()

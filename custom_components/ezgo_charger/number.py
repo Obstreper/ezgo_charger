@@ -8,7 +8,7 @@ from homeassistant.const import UnitOfElectricCurrent
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CURRENT_MAX, CURRENT_MIN, DOMAIN
+from .const import CURRENT_MIN, DOMAIN
 from .coordinator import EzgoCoordinator
 from .entity import EzgoEntity
 
@@ -30,7 +30,6 @@ class EzgoChargeCurrentNumber(EzgoEntity, NumberEntity):
 
     _attr_translation_key = "charge_current"
     _attr_native_min_value = CURRENT_MIN
-    _attr_native_max_value = CURRENT_MAX
     _attr_native_step = 1
     _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
     _attr_mode = NumberMode.SLIDER
@@ -38,6 +37,11 @@ class EzgoChargeCurrentNumber(EzgoEntity, NumberEntity):
 
     def __init__(self, coordinator: EzgoCoordinator) -> None:
         super().__init__(coordinator, "charge_current")
+
+    @property
+    def native_max_value(self) -> float:
+        """Follow the charger's pigtail rating (0x77 +24) when it's known."""
+        return self.coordinator.current_max
 
     @property
     def native_value(self) -> float | None:

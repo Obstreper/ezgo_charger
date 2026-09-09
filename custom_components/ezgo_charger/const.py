@@ -55,6 +55,14 @@ MAX_BUFFER = 4096           # reassembly buffer hard cap
 CURRENT_MIN = 6
 CURRENT_MAX = 15
 
+# The 0x77 status field at +26 is the setpoint; +24 is a constant that reads 10
+# in every capture and is believed to be the rating of the installed current-limit
+# pigtail (the aConnect app clamps selectable amperage to it: 8/10 A on the 10 A
+# tail). Only the 10 A tail has been captured - 15 A is inferred from the hardware
+# options. Values outside this set trigger a warning and fall back to the lowest
+# known rating.
+KNOWN_RATED_CURRENTS = (10, 15)
+
 # Human-readable names for 0x77 offset +0. Only "2" (idle/standby) is confirmed;
 # extend once charging / fault states have been captured.
 STATE_NAMES: dict[int, str] = {
